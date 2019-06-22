@@ -27,6 +27,7 @@ import (
 
 	"github.com/longhorn/backupstore"
 	"github.com/longhorn/longhorn-manager/datastore"
+	"github.com/longhorn/longhorn-manager/engineapi"
 	"github.com/longhorn/longhorn-manager/scheduler"
 	"github.com/longhorn/longhorn-manager/types"
 	"github.com/longhorn/longhorn-manager/util"
@@ -551,6 +552,8 @@ func (vc *VolumeController) ReconcileVolumeState(v *longhorn.Volume, e *longhorn
 			return err
 		}
 		v.Spec.NodeID = usableNode.Name
+		//User should not access the front end by accident
+		e.Spec.Frontend = ""
 	}
 
 	if e.Status.CurrentState == types.InstanceStateError && v.Spec.NodeID != "" {
@@ -808,6 +811,9 @@ func (vc *VolumeController) ReconcileVolumeState(v *longhorn.Volume, e *longhorn
 		if e.Status.CurrentState != types.InstanceStateRunning {
 			return nil
 		}
+
+		//Restore the replicas if required
+		vc.Restore(v, e)
 
 		v.Status.State = types.VolumeStateAttached
 		if oldState != v.Status.State {
@@ -1543,4 +1549,95 @@ func (vc *VolumeController) processMigration(v *longhorn.Volume, es map[string]*
 
 	logrus.Infof("volume %v: migration: migration node %v is ready", v.Name, v.Spec.MigrationNodeID)
 	return nil
+}
+
+func (vc *VolumeController) GetEngineImage(image string) (*longhorn.EngineImage, error) {
+	name := types.GetEngineImageChecksumName(image)
+	return vc.ds.GetEngineImage(name)
+}
+
+func (vc *VolumeController) CheckEngineImageReadiness(image string) error {
+	ei, err := vc.GetEngineImage(image)
+	if err != nil {
+		return errors.Wrapf(err, "unable to get engine image %v", image)
+	}
+	if ei.Status.State != types.EngineImageStateReady {
+		return fmt.Errorf("engine image %v (%v) is not ready, it's %v", ei.Name, image, ei.Status.State)
+	}
+	return nil
+}
+
+func (vc *VolumeController) GetEngineClient(volumeName string) (client engineapi.EngineClient, err error) {
+	var e *longhorn.Engine
+
+	defer func() {
+		err = errors.Wrapf(err, "cannot get client for volume %v", volumeName)
+	}()
+	es, err := vc.ds.ListVolumeEngines(volumeName)
+	if err != nil {
+		return nil, err
+	}
+	if len(es) == 0 {
+		return nil, fmt.Errorf("cannot fine engine")
+	}
+	if len(es) != 1 {
+		return nil, fmt.Errorf("more than one engine exists")
+	}
+	for _, e = range es {
+		break
+	}
+	if e.Status.CurrentState != types.InstanceStateRunning {
+		return nil, fmt.Errorf("engine is not running")
+	}
+	if err := vc.CheckEngineImageReadiness(e.Status.CurrentImage); err != nil {
+		return nil, errors.Wrapf(err, "cannot get engine client with image %v", e.Status.CurrentImage)
+	}
+
+	engineCollection := &engineapi.EngineCollection{}
+	return engineCollection.NewEngineClient(&engineapi.EngineClientRequest{
+		VolumeName:  e.Spec.VolumeName,
+		EngineImage: e.Status.CurrentImage,
+		IP:          e.Status.IP,
+	})
+}
+
+func (vc *VolumeController) Restore(v *longhorn.Volume, e *longhorn.Engine) error {
+	engine, err := vc.GetEngineClient(v.Name)
+	if err != nil {
+		return fmt.Errorf("failed to get engine client: %v", err)
+	}
+
+	if v.Spec.FromBackup == "" {
+		logrus.Errorf("Empty FromBackup")
+		return nil
+	}
+
+	if err := engine.BackupRestore(v.Spec.FromBackup); err != nil {
+		logrus.Errorf("Failed to initiate Backup Restore from Volume Controller")
+		return err
+	}
+
+	logrus.Infof("Successfully initiated Backup Restore for URL: %v", v.Spec.FromBackup)
+
+	restoreStatusList, err := engine.BackupRestoreStatus()
+	if err != nil {
+		logrus.Errorf("failed to get backup restore status")
+		return err
+	}
+
+	for j := 0; j < 3600; j++ {
+		completed := 0
+		for i, restore := range restoreStatusList {
+			logrus.Errorf("restore of replica[%v]: %v", i, restore)
+			if restore.Progress == 100 {
+				completed++
+			}
+		}
+		if completed == len(e.Spec.ReplicaAddressMap) {
+			logrus.Errorf("Successfully finished on all replicas.")
+			return nil
+		}
+		time.Sleep(time.Second)
+	}
+	return err
 }

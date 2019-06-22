@@ -358,14 +358,14 @@ func (rc *ReplicaController) CreatePodSpec(obj interface{}) (*v1.Pod, error) {
 	if r.Spec.BaseImage != "" {
 		cmd = append(cmd, "--backing-file", "/share/base_image")
 	}
-	toRestore, err := rc.restoreNeedForReplica(r)
+	/*toRestore, err := rc.restoreNeedForReplica(r)
 	if err != nil {
 		return nil, err
 	}
 	if toRestore {
 		cmd = append(cmd, "--restore-from", singleQuotes(r.Spec.RestoreFrom))
 		cmd = append(cmd, "--restore-name", singleQuotes(r.Spec.RestoreName))
-	}
+	} */
 	cmd = append(cmd, "/volume")
 
 	privilege := true
@@ -487,22 +487,24 @@ func (rc *ReplicaController) CreatePodSpec(obj interface{}) (*v1.Pod, error) {
 	// set pod to node that replica scheduled on
 	pod.Spec.NodeName = r.Spec.NodeID
 
-	if toRestore {
-		secret, err := rc.ds.GetSetting(types.SettingNameBackupTargetCredentialSecret)
-		if err != nil {
-			return nil, err
-		}
-		if secret.Value != "" {
-			credentials, err := rc.ds.GetCredentialFromSecret(secret.Value)
+	/*
+		if toRestore {
+			secret, err := rc.ds.GetSetting(types.SettingNameBackupTargetCredentialSecret)
 			if err != nil {
 				return nil, err
 			}
-			hasEndpoint := (credentials[types.AWSEndPoint] != "")
-			if err := util.ConfigEnvWithCredential(r.Spec.RestoreFrom, secret.Value, hasEndpoint, &pod.Spec.Containers[0]); err != nil {
-				return nil, err
+			if secret.Value != "" {
+				credentials, err := rc.ds.GetCredentialFromSecret(secret.Value)
+				if err != nil {
+					return nil, err
+				}
+				hasEndpoint := (credentials[types.AWSEndPoint] != "")
+				if err := util.ConfigEnvWithCredential(r.Spec.RestoreFrom, secret.Value, hasEndpoint, &pod.Spec.Containers[0]); err != nil {
+					return nil, err
+				}
 			}
 		}
-	}
+	*/
 
 	resourceReq, err := GetGuaranteedResourceRequirement(rc.ds)
 	if err != nil {
